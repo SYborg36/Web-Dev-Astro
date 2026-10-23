@@ -143,36 +143,103 @@ def send_message(token, room_id, message):
 # =========================
 # WEATHER FUNCTIONS
 # =========================
-def get_city_coordinates(city, api_key):
-    url = #complete the URL to fetch city coordinates from OpenWeatherMap API
-    params = #complete the params dictionary to include the city name, limit, and the API key
-    response = requests.#complete(url, params=params)
+GEO_BASE_URL = "https://api.openweathermap.org/geo/1.0"
+WEATHER_URL = "https://api.openweathermap.org/data/2.5/weather"
 
-    if response.status_code != 200:
+def value_or_na(value, unit=""):
+    # Shows "N/A" instead of crashing or printing "None" when data is missing
+    return "N/A" if value is None else f"{value}{unit}"
+
+
+def format_epoch(epoch, utc_offset=0):
+    # Converts a Unix epoch (seconds since 1 Jan 1970 UTC) into readable text.
+    # utc_offset (seconds) shifts the time to the local time of a city.
+    if epoch is None:
+        return "Unknown"
+    return time.strftime("%a %d %b %Y, %H:%M", time.gmtime(epoch + utc_offset))
+
+
+def get_city_coordinates(city, api_key):
+    url = f"{GEO_BASE_URL}/direct"
+    params = {"q": city, "limit": 1, "appid": api_key}
+    try:
+        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException:
         return None
 
-    data = response.json()
-    return data[0] if data else None
+    if response.status_code != 200:
+        print("Geocoding API error:", response.status_code)
+        return None
+
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    # The API returns a list; an empty list means no match was found
+    return data[0] if isinstance(data, list) and data else None
+
+
+def get_weather_data(lat, lon, api_key):
+    # Fetches raw weather JSON for any coordinates (used by /weather and /iss)
+    params = {"lat": lat, "lon": lon, "units": "metric", "appid": api_key}
+    try:
+        response = requests.get(WEATHER_URL, params=params, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException:
+        return None
+
+    if response.status_code != 200:
+        print("Weather API error:", response.status_code)
+        return None
+
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def stargazing_verdict(weather):
+    # Judges sky conditions using cloud cover %, visibility and rain/snow
+    clouds = weather.get("clouds", {}).get("all")
+    visibility = weather.get("visibility")
+    condition = (weather.get("weather") or [{}])[0].get("main", "")
+
+    if condition in ("Rain", "Drizzle", "Thunderstorm", "Snow"):
+        return f"Poor ❌ ({condition.lower()})"
+    if clouds is None:
+        return "Unknown (no cloud data)"
+    if clouds <= 20 and (visibility is None or visibility >= 8000):
+        return "Good ✅ (mostly clear skies)"
+    if clouds <= 60:
+        return "Fair ⚠️ (some cloud cover)"
+    return "Poor ❌ (heavy cloud cover)"
 
 
 def get_weather(city, api_key):
     location = get_city_coordinates(city, api_key)
 
     if not location:
-        return #complete the return statement to indicate that the city was not found
+        return f"Sorry, I couldn't find a city called '{city}'. Check the spelling and try again."
 
-    url = #complete the URL to fetch weather data from OpenWeatherMap API
-    params = #complete the params dictionary to include the latitude, longitude, units as metric, and the API key
+    weather = get_weather_data(location["lat"], location["lon"], api_key)
 
-    response = requests.#complete(url, params=params)
+    if not weather:
+        return "Sorry, the weather data could not be retrieved right now. Please try again later."
 
-    if response.status_code != 200:
-        return #complete the return statement to indicate that the wheather weather data retrieved or not
-
-    weather = response.json()
+    main = weather.get("main", {})
+    wind = weather.get("wind", {})
+    sys_info = weather.get("sys", {})
+    description = (weather.get("weather") or [{}])[0].get("description", "Unknown")
+    offset = weather.get("timezone", 0)
 
     return (
-        #complete the return statement to format and return the weather information such as including city name, country, temperature, weather description, humidity, and wind speed
+        f"🌤️ Weather for {weather.get('name') or location.get('name', city)}, {sys_info.get('country', 'N/A')}\n"
+        f"🕒 Local time: {format_epoch(weather.get('dt'), offset)}\n"
+        f"🌡️ Temperature: {value_or_na(main.get('temp'), '°C')} (feels like {value_or_na(main.get('feels_like'), '°C')})\n"
+        f"☁️ Conditions: {description.capitalize()}, cloud cover {value_or_na(weather.get('clouds', {}).get('all'), '%')}\n"
+        f"💧 Humidity: {value_or_na(main.get('humidity'), '%')}\n"
+        f"💨 Wind: {value_or_na(wind.get('speed'), ' m/s')}\n"
+        f"🌇 Sunset: {format_epoch(sys_info.get('sunset'), offset)}\n"
+        f"🔭 Stargazing: {stargazing_verdict(weather)}"
     )
 
 # =========================
