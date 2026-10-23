@@ -11,6 +11,7 @@
 import requests                 # sends HTTP GET/POST requests to the APIs
 import json                     # converts Python dictionaries into JSON text
 import time                     # 5-second polling delay + epoch time conversion
+import math                     # cosine maths for the moon phase calculation
 from datetime import datetime   # timestamps for the console log
 import os                       # reads environment variables (API keys)
 from getpass import getpass     # hides the token/key while it is typed in
@@ -188,4 +189,350 @@ def get_weather_data(lat, lon, api_key):
         return None
 
     if response.status_code != 200:
-        print("Weather API
+        print("Weather API error:", response.status_code)
+        return None
+
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def stargazing_verdict(weather):
+    # Judges sky conditions using cloud cover %, visibility and rain/snow
+    clouds = weather.get("clouds", {}).get("all")
+    visibility = weather.get("visibility")
+    condition = (weather.get("weather") or [{}])[0].get("main", "")
+
+    if condition in ("Rain", "Drizzle", "Thunderstorm", "Snow"):
+        return f"Poor ❌ ({condition.lower()})"
+    if clouds is None:
+        return "Unknown (no cloud data)"
+    if clouds <= 20 and (visibility is None or visibility >= 8000):
+        return "Good ✅ (mostly clear skies)"
+    if clouds <= 60:
+        return "Fair ⚠️ (some cloud cover)"
+    return "Poor ❌ (heavy cloud cover)"
+
+
+def get_weather(city, api_key):
+    location = get_city_coordinates(city, api_key)
+
+    if not location:
+        return f"Sorry, I couldn't find a city called '{city}'. Check the spelling and try again."
+
+    weather = get_weather_data(location["lat"], location["lon"], api_key)
+
+    if not weather:
+        return "Sorry, the weather data could not be retrieved right now. Please try again later."
+
+    main = weather.get("main", {})
+    wind = weather.get("wind", {})
+    sys_info = weather.get("sys", {})
+    description = (weather.get("weather") or [{}])[0].get("description", "Unknown")
+    offset = weather.get("timezone", 0)
+
+    return (
+        f"🌤️ Weather for {weather.get('name') or location.get('name', city)}, {sys_info.get('country', 'N/A')}\n"
+        f"🕒 Local time: {format_epoch(weather.get('dt'), offset)}\n"
+        f"🌡️ Temperature: {value_or_na(main.get('temp'), '°C')} (feels like {value_or_na(main.get('feels_like'), '°C')})\n"
+        f"☁️ Conditions: {description.capitalize()}, cloud cover {value_or_na(weather.get('clouds', {}).get('all'), '%')}\n"
+        f"💧 Humidity: {value_or_na(main.get('humidity'), '%')}\n"
+        f"💨 Wind: {value_or_na(wind.get('speed'), ' m/s')}\n"
+        f"🌇 Sunset: {format_epoch(sys_info.get('sunset'), offset)}\n"
+        f"🔭 Stargazing: {stargazing_verdict(weather)}"
+    )
+
+# =========================
+# ISS FUNCTIONS
+# =========================
+ISS_URL = "http://api.open-notify.org/iss-now.json"
+
+def format_coords(lat, lon):
+    # Turns -12.49, 98.22 into "12.4900° S, 98.2200° E"
+    lat_dir = "N" if lat >= 0 else "S"
+    lon_dir = "E" if lon >= 0 else "W"
+    return f"{abs(lat):.4f}° {lat_dir}, {abs(lon):.4f}° {lon_dir}"
+
+
+def reverse_geocode(lat, lon, api_key):
+    url = f"{GEO_BASE_URL}/reverse"
+    params = {"lat": lat, "lon": lon, "limit": 1, "appid": api_key}
+
+    try:
+        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException:
+        return None
+
+    if response.status_code != 200:
+        return None
+
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    # The API returns a list; an empty list means no match was found
+    return data[0] if isinstance(data, list) and data else None
+
+
+def get_iss_location(api_key):
+    url = ISS_URL
+
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException:
+        return "Sorry, the ISS location service could not be reached. Please try again later."
+
+    if response.status_code != 200:
+        return "Sorry, the ISS location could not be retrieved right now."
+
+    # The API returns latitude/longitude as strings, so convert them to numbers
+    try:
+        data = response.json()
+        lat = float(data["iss_position"]["latitude"])
+        lon = float(data["iss_position"]["longitude"])
+    except (ValueError, KeyError, TypeError):
+        return "Sorry, the ISS API returned unexpected data."
+
+    location = reverse_geocode(lat, lon, api_key)
+
+    place = "Over Ocean / No Nearby City"
+
+    if location:
+        parts = [location.get("name"), location.get("state"), location.get("country")]
+        place = ", ".join(part for part in parts if part)
+
+    # Weather conditions directly below the ISS
+    weather = get_weather_data(lat, lon, api_key)
+    if weather:
+        description = (weather.get("weather") or [{}])[0].get("description", "Unknown")
+        temp = value_or_na(weather.get("main", {}).get("temp"), "°C")
+        clouds = value_or_na(weather.get("clouds", {}).get("all"), "%")
+        weather_line = f"{description.capitalize()}, {temp}, cloud cover {clouds}"
+    else:
+        weather_line = "N/A"
+
+    return (
+        f"🛰️ ISS Current Location\n"
+        f"🕒 Time: {format_epoch(data.get('timestamp'))} UTC\n"
+        f"📍 Coordinates: {format_coords(lat, lon)}\n"
+        f"🌍 Over: {place}\n"
+        f"🌤️ Weather below: {weather_line}"
+    )
+
+# =========================
+# EXTENDED FEATURE - /sky STARGAZING FORECAST
+# =========================
+SKY_URL = "https://api.open-meteo.com/v1/forecast"  # Open-Meteo: free, no API key
+SYNODIC_MONTH = 29.530588853   # average days from one new moon to the next
+KNOWN_NEW_MOON = 947182440     # epoch of a known new moon (6 Jan 2000, 18:14 UTC)
+
+MOON_PHASES = [
+    (1.85, "New Moon 🌑"), (5.54, "Waxing Crescent 🌒"), (9.23, "First Quarter 🌓"),
+    (12.92, "Waxing Gibbous 🌔"), (16.61, "Full Moon 🌕"), (20.30, "Waning Gibbous 🌖"),
+    (23.99, "Last Quarter 🌗"), (27.68, "Waning Crescent 🌘"), (29.54, "New Moon 🌑"),
+]
+
+
+def get_moon_phase(epoch=None):
+    # Works out how many days into the current lunar cycle we are,
+    # then names the phase and estimates how much of the moon is lit
+    if epoch is None:
+        epoch = time.time()
+    age = ((epoch - KNOWN_NEW_MOON) / 86400) % SYNODIC_MONTH
+    illumination = round((1 - math.cos(2 * math.pi * age / SYNODIC_MONTH)) / 2 * 100)
+    for limit, name in MOON_PHASES:
+        if age < limit:
+            return name, illumination
+    return "Unknown", illumination
+
+
+def get_sky_forecast(lat, lon):
+    # Hourly cloud cover, visibility and day/night flag for the next 2 days
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "hourly": "cloud_cover,visibility,is_day",
+        "daily": "sunrise,sunset",
+        "timezone": "auto",          # times come back in the city's local time
+        "forecast_days": 2
+    }
+    try:
+        response = requests.get(SKY_URL, params=params, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException:
+        return None
+
+    if response.status_code != 200:
+        print("Open-Meteo API error:", response.status_code)
+        return None
+
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def get_sky_report(city, api_key):
+    location = get_city_coordinates(city, api_key)  # reuses the geocoding function
+
+    if not location:
+        return f"Sorry, I couldn't find a city called '{city}'. Check the spelling and try again."
+
+    forecast = get_sky_forecast(location["lat"], location["lon"])
+
+    if not forecast:
+        return "Sorry, the stargazing forecast could not be retrieved right now. Please try again later."
+
+    hourly = forecast.get("hourly", {})
+    times = hourly.get("time", [])
+    clouds = hourly.get("cloud_cover", [])
+    visibility = hourly.get("visibility") or [None] * len(times)
+    is_day = hourly.get("is_day", [])
+
+    # Current hour in the city's local time, in the same format as the API ("2026-10-23T21:00")
+    offset = forecast.get("utc_offset_seconds", 0)
+    now = time.strftime("%Y-%m-%dT%H:00", time.gmtime(time.time() + offset))
+
+    # Keep only the night-time hours in the next 24 hours
+    hours = list(zip(times, clouds, visibility, is_day))
+    upcoming = [hour for hour in hours if hour[0] >= now][:24]
+    night = [hour for hour in upcoming if hour[3] == 0 and hour[1] is not None]
+
+    if not night:
+        return "Sorry, no night-time forecast is available for that location right now."
+
+    average_cloud = round(sum(hour[1] for hour in night) / len(night))
+    best_time, best_cloud, best_vis, _ = min(night, key=lambda hour: hour[1])
+    best_vis_text = f"{best_vis / 1000:.0f} km" if best_vis is not None else "N/A"
+
+    daily = forecast.get("daily", {})
+    sunsets = daily.get("sunset", [])
+    sunrises = daily.get("sunrise", [])
+    sunset = sunsets[0][11:16] if sunsets else "N/A"
+    sunrise = sunrises[1][11:16] if len(sunrises) > 1 else "N/A"
+
+    moon_name, moon_lit = get_moon_phase()
+
+    if best_cloud <= 20:
+        verdict = f"Good ✅ - clear spell around {best_time[11:16]}"
+    elif best_cloud <= 50:
+        verdict = f"Fair ⚠️ - partly cloudy, best around {best_time[11:16]}"
+    else:
+        verdict = "Poor ❌ - cloudy all night"
+    if moon_lit >= 70 and best_cloud <= 50:
+        verdict += " (bright moon will hide faint stars)"
+
+    return (
+        f"🌌 Tonight's sky for {location.get('name', city)}, {location.get('country', 'N/A')}\n"
+        f"🌇 Sunset: {sunset}  |  🌅 Sunrise: {sunrise} (local time)\n"
+        f"☁️ Average cloud cover tonight: {average_cloud}%\n"
+        f"⭐ Best time to look up: {best_time[11:16]} (cloud {best_cloud}%, visibility {best_vis_text})\n"
+        f"🌙 Moon: {moon_name} ({moon_lit}% lit)\n"
+        f"🔭 Verdict: {verdict}"
+    )
+
+# =========================
+# MAIN BOT LOGIC
+# =========================
+HELP_TEXT = (
+    "🔭 AstroBot commands:\n"
+    "/weather <city> - weather and stargazing conditions\n"
+    "/iss - where the International Space Station is now\n"
+    "/sky <city> - tonight's stargazing forecast and moon phase\n"
+    "/help - show this list\n"
+    "/quit - stop AstroBot"
+)
+
+
+def is_valid_city(city):
+    # Input validation: letters, spaces and - ' , . only, max 60 characters
+    city = city.strip()
+    return 0 < len(city) <= 60 and all(ch.isalpha() or ch in " -',." for ch in city)
+
+
+def main():
+
+    token = get_webex_token()
+
+    weather_key = get_api_key(
+        "Weather API key",
+        os.getenv("OPENWEATHER_API_KEY", "")
+    )
+
+    rooms = get_rooms(token)
+
+    if not rooms:
+        print("No rooms found. Check your Webex token and that you are in at least one space.")
+        return
+
+    print_rooms(rooms)
+    room_id = select_room(rooms)
+
+    # Remember the newest message now so old messages are never processed
+    last_message_id, _ = get_latest_message(token, room_id)
+    print("AstroBot is running - type /help in Webex. Press Ctrl+C here to stop.")
+
+    while True:
+
+        # Wait first, so the room is polled exactly once every 5 seconds
+        # (also respects the Open Notify request to poll no faster than this)
+        time.sleep(5)
+
+        message_id, message_text = get_latest_message(token, room_id)
+
+        if message_id and message_id != last_message_id:
+
+            last_message_id = message_id
+            message_text = (message_text or "").strip()
+
+            print(f"[{datetime.now():%H:%M:%S}] Received: {message_text}")
+
+            # Ignore normal chat and the bot's own replies (they never start with /)
+            if not message_text.startswith("/"):
+                continue
+
+            command = message_text.lower()
+
+            if command == "/help":
+                send_message(token, room_id, HELP_TEXT)
+
+            elif command.startswith("/weather"):
+
+                parts = message_text.split(maxsplit=1)
+
+                if len(parts) < 2:
+                    send_message(token, room_id, "Usage: /weather <city>  (e.g. /weather London)")
+                elif not is_valid_city(parts[1]):
+                    send_message(token, room_id, "Please enter a valid city name (letters only, max 60 characters).")
+                else:
+                    city = parts[1].strip()
+                    send_message(token, room_id, get_weather(city, weather_key))
+
+            elif command.startswith("/sky"):
+
+                parts = message_text.split(maxsplit=1)
+
+                if len(parts) < 2:
+                    send_message(token, room_id, "Usage: /sky <city>  (e.g. /sky Stevenage)")
+                elif not is_valid_city(parts[1]):
+                    send_message(token, room_id, "Please enter a valid city name (letters only, max 60 characters).")
+                else:
+                    city = parts[1].strip()
+                    send_message(token, room_id, get_sky_report(city, weather_key))
+
+            elif command == "/iss":
+                send_message(token, room_id, get_iss_location(weather_key))
+
+            elif command == "/quit":
+                send_message(token, room_id, "AstroBot shutting down. Clear skies! 🌌")
+                break
+
+            else:
+                send_message(token, room_id, "Unknown command. Use /help")
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nAstroBot stopped.")
