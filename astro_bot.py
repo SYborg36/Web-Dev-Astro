@@ -53,39 +53,61 @@ def get_api_key(prompt, hardcoded_key):
 # =========================
 # WEBEX FUNCTIONS
 # =========================
-def get_rooms(token):
-    url = #complete the URL to fetch rooms from Webex API
-    headers = #complete the headers dictionary to include the Authorization header with the token
-    response = #complete the request to get rooms using requests.get with the url and headers
+WEBEX_BASE_URL = "https://webexapis.com/v1"
 
-    if response.status_code != #complete the condition to check if the response status code is not xxx:
+def get_rooms(token):
+    url = f"{WEBEX_BASE_URL}/rooms"
+    headers = {"Authorization": token}  # token already includes "Bearer "
+    try:
+        response = requests.get(url, headers=headers, params={"max": 100}, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException as error:
+        print("Network error while fetching rooms:", error)
+        return []
+
+    if response.status_code != 200:
         print("Error fetching rooms:", response.status_code)
+        if response.status_code == 401:
+            print("Your Webex token is invalid or expired (personal tokens last 12 hours).")
         return []
 
     return response.json().get("items", [])
 
 
 def print_rooms(rooms):
+    print("\nAvailable Webex rooms:")
     for room in rooms:
-        print(#complete the print statement to display the room title and id)
+        print(f"  - {room.get('title', 'Untitled')}  (type: {room.get('type', 'N/A')})")
 
 
 def select_room(rooms):
     while True:
-        name = input(#complete the input prompt to ask the user for the room name)
+        name = input("\nEnter the name of the room to monitor: ").strip()
+        if not name:
+            continue  # an empty name would match every room, so ask again
         for room in rooms:
             if name.lower() in room["title"].lower():
-                print(#complete the print statement to confirm the selected room)
+                print(f"Monitoring room: {room['title']}")
                 return room["id"]
-        print(#complete the print statement to indicate that the room was not found)
+        print("Room not found. Please check the name and try again.")
 
 
 def get_latest_message(token, room_id):
-    url = #complete the URL to fetch messages from Webex API
-    params = {"roomId":#complete, "max": #complete}
-    headers = #complete the headers dictionary to include the Authorization header with the token
+    url = f"{WEBEX_BASE_URL}/messages"
+    params = {"roomId": room_id, "max": 1}  # only the newest message is needed
+    headers = {"Authorization": token}
 
-    response = requests.#complete(#complete, headers=headers, params=params)
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException:
+        return None, None
+
+    # 429 = Too Many Requests: Webex says how long to wait in the Retry-After header
+    if response.status_code == 429:
+        retry_after = response.headers.get("Retry-After", "60")
+        wait = int(retry_after) if retry_after.isdigit() else 60
+        print(f"Rate limited by Webex - waiting {wait} seconds.")
+        time.sleep(wait)
+        return None, None
 
     if response.status_code != 200:
         return None, None
@@ -100,13 +122,23 @@ def get_latest_message(token, room_id):
 
 
 def send_message(token, room_id, message):
-    url = #complete the URL to send messages to Webex API
-    headers = #complete the headers dictionary to include the Authorization header with the token and Content-Type as application/json
+    url = f"{WEBEX_BASE_URL}/messages"
+    headers = {
+        "Authorization": token,
+        "Content-Type": "application/json"
+    }
     data = {
         "roomId": room_id,
         "text": message
     }
-    requests.#complete(url, headers=headers, data=json.dumps(data))
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(data), timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException as error:
+        print("Network error while sending message:", error)
+        return
+
+    if not response.ok:  # .ok is True for any 2xx success code
+        print("Error sending message:", response.status_code)
 
 # =========================
 # WEATHER FUNCTIONS
