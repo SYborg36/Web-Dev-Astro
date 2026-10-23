@@ -1,17 +1,29 @@
 #Contains partially completed code with sections for you to complete
 #IT IS MANDATORY TO USE THE RESOURCE PROVIDED
-#The starter code is structured into functions and modules. You are required to complete the missing sections while maintaining this modular design.  Further step by step instructions can be found in the appendix A of this assignment brief. 
-#For extended features implement it within the existing modular structure. The new feature must be triggered using a new command (e.g., /stars, /moon, /sky) and follow the same approach 
-#Use Git for version control. Maintain a repository on GitHub to track your project’s progress and changes. Ensure regular commits for each step with meaningful messages that document your step by stepdevelopment process. 
+#The starter code is structured into functions and modules. You are required to complete the missing sections while maintaining this modular design.  Further step by step instructions can be found in the appendix A of this assignment brief.
+#For extended features implement it within the existing modular structure. The new feature must be triggered using a new command (e.g., /stars, /moon, /sky) and follow the same approach
+#Use Git for version control. Maintain a repository on GitHub to track your project's progress and changes. Ensure regular commits for each step with meaningful messages that document your step by stepdevelopment process.
 
 # =========================
 # REQUIRED LIBRARIES
 # =========================
 
-import #complete the import statement to include the requests library
-import #complete the import statement to include the json library
-import #complete the import statement to include the time library
-from #complete the import statement to include the datetime library
+import requests                 # sends HTTP GET/POST requests to the APIs
+import json                     # converts Python dictionaries into JSON text
+import time                     # 5-second polling delay + epoch time conversion
+from datetime import datetime   # timestamps for the console log
+import os                       # reads environment variables (API keys)
+from getpass import getpass     # hides the token/key while it is typed in
+
+# python-dotenv loads WEBEX_TOKEN and OPENWEATHER_API_KEY from a local .env file,
+# so no secret is ever written in this code or pushed to GitHub.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    print("python-dotenv is not installed - you will be asked to type your keys in.")
+
+REQUEST_TIMEOUT = 10  # seconds to wait for any API before giving up
 
 # =========================
 # CONFIGURATION FUNCTIONS
@@ -19,13 +31,24 @@ from #complete the import statement to include the datetime library
 def get_webex_token():
     choice = input("Use hard-coded Webex token? (y/n): ").lower()
     if choice == "n":
-        token = input("Enter your Webex Access Token: ")
+        token = getpass("Enter your Webex Access Token: ").strip()
         return f"Bearer {token}"
     else:
-        return "Bearer YOUR_WEBEX_TOKEN"
+        # The "hard-coded" token is read from the .env file instead of the code
+        token = os.getenv("WEBEX_TOKEN", "")
+        if not token:
+            print("WEBEX_TOKEN was not found in the .env file.")
+            token = getpass("Enter your Webex Access Token: ").strip()
+        return f"Bearer {token}"
 
 def get_api_key(prompt, hardcoded_key):
-  #complete the function to get the API key from user input or use a hardcoded key
+    # Ask whether to use the stored key (from .env) or type a different one
+    choice = input(f"Use hard-coded {prompt}? (y/n): ").lower()
+    if choice == "n" or not hardcoded_key:
+        if not hardcoded_key:
+            print(f"{prompt} was not found in the .env file.")
+        return getpass(f"Enter your {prompt}: ").strip()
+    return hardcoded_key
 
 # =========================
 # WEBEX FUNCTIONS
