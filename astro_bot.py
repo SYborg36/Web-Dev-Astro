@@ -245,41 +245,78 @@ def get_weather(city, api_key):
 # =========================
 # ISS FUNCTIONS
 # =========================
-def reverse_geocode(lat, lon, api_key):
-    url = #complete the URL to fetch reverse geocoding data from OpenWeatherMap API
-    params = #complete the params dictionary to include the latitude, longitude, limit, and the API key
+ISS_URL = "http://api.open-notify.org/iss-now.json"
 
-    response = requests.#complete(url, params=params)
+def format_coords(lat, lon):
+    # Turns -12.49, 98.22 into "12.4900° S, 98.2200° E"
+    lat_dir = "N" if lat >= 0 else "S"
+    lon_dir = "E" if lon >= 0 else "W"
+    return f"{abs(lat):.4f}° {lat_dir}, {abs(lon):.4f}° {lon_dir}"
+
+
+def reverse_geocode(lat, lon, api_key):
+    url = f"{GEO_BASE_URL}/reverse"
+    params = {"lat": lat, "lon": lon, "limit": 1, "appid": api_key}
+
+    try:
+        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException:
+        return None
 
     if response.status_code != 200:
         return None
 
-    data = response.json()
-    return data[0] if data else None
+    try:
+        data = response.json()
+    except ValueError:
+        return None
+    # The API returns a list; an empty list means no match was found
+    return data[0] if isinstance(data, list) and data else None
 
 
 def get_iss_location(api_key):
-    url = #complete the URL to fetch ISS current location from the Open Notify API
+    url = ISS_URL
 
-    response = requests.#complete(#complete)
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+    except requests.exceptions.RequestException:
+        return "Sorry, the ISS location service could not be reached. Please try again later."
 
     if response.status_code != 200:
-        return #complete the return statement to indicate whether ISS location retrieved or not
+        return "Sorry, the ISS location could not be retrieved right now."
 
-    data = response.json()
-
-    lat = data[#complete][#complete]
-    lon = data[#complete][#complete]
+    # The API returns latitude/longitude as strings, so convert them to numbers
+    try:
+        data = response.json()
+        lat = float(data["iss_position"]["latitude"])
+        lon = float(data["iss_position"]["longitude"])
+    except (ValueError, KeyError, TypeError):
+        return "Sorry, the ISS API returned unexpected data."
 
     location = reverse_geocode(lat, lon, api_key)
 
     place = "Over Ocean / No Nearby City"
 
     if location:
-        place = #
+        parts = [location.get("name"), location.get("state"), location.get("country")]
+        place = ", ".join(part for part in parts if part)
+
+    # Weather conditions directly below the ISS
+    weather = get_weather_data(lat, lon, api_key)
+    if weather:
+        description = (weather.get("weather") or [{}])[0].get("description", "Unknown")
+        temp = value_or_na(weather.get("main", {}).get("temp"), "°C")
+        clouds = value_or_na(weather.get("clouds", {}).get("all"), "%")
+        weather_line = f"{description.capitalize()}, {temp}, cloud cover {clouds}"
+    else:
+        weather_line = "N/A"
 
     return (
-        #complete the return statement to format and return the ISS location information including latitude, longitude, and place name
+        f"🛰️ ISS Current Location\n"
+        f"🕒 Time: {format_epoch(data.get('timestamp'))} UTC\n"
+        f"📍 Coordinates: {format_coords(lat, lon)}\n"
+        f"🌍 Over: {place}\n"
+        f"🌤️ Weather below: {weather_line}"
     )
 
 # =========================
